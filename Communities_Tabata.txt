@@ -1,0 +1,177 @@
+// study area =============================================================================================
+var studyArea = ee.Geometry.Rectangle([-78.2, -9.8, -76.8, -8.3]);
+
+// add to map
+Map.addLayer(studyArea, {
+  color: 'blue'
+}, 'studyArea');
+
+// center map
+Map.setCenter(-77.5, -9.2, 9.5);
+
+// basins ================================================================================================
+var dataset = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_10');
+
+// basins in study area
+var basinsStudy = dataset.filterBounds(studyArea);
+
+// add to map
+Map.addLayer(basinsStudy.style({
+  color: 'black',
+  width: 1,
+  fillColor: '00000000'
+}), {}, 'Basins');
+
+// year to analize ========================================================================================
+var year = 2025;   // <-- JUST VISUAL =====================================================================
+
+// WSF Evolution (1985-2014) - yearly settlement detection year
+var wsfEvo = ee.ImageCollection('projects/sat-io/open-datasets/WSF/WSF_EVO').mosaic();
+
+// Dynamic World (2015-present) - built probability from Sentinel-2
+var dw = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1')
+  .filterBounds(studyArea);
+
+// Chose dataset by year
+var settlementImage;
+var settlementVis;
+var datasetUsed;
+var settlementScale;
+
+// ============ CASE 1: WSF Evolution =============
+if (year >= 1985 && year < 2015) {
+
+  // In WSF Evolution, pixel values are the first detected settlement year.
+  // So for a chosen year, settlement = pixels with value > 0 and <= chosen year.
+  settlementImage = wsfEvo
+    .gt(0)
+    .and(wsfEvo.lte(year))
+    .selfMask()
+    .clip(studyArea);
+
+  settlementVis = {palette: ['red']};
+  datasetUsed = 'WSF Evolution';
+  settlementScale = 30;
+
+// ============ CASE 2: Dynamic World =============
+} else if (year >= 2015) {
+  
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = startDate.advance(1, 'year');
+
+  var builtProb = dw
+    .filterDate(startDate, endDate)
+    .select('built')
+    .median()
+    .clip(studyArea);
+
+  // Threshold for built-up settlement
+  settlementImage = builtProb.gt(0.5).selfMask();
+
+  settlementVis = {palette: ['red']};
+  datasetUsed = 'Dynamic World';
+  settlementScale = 10;
+
+// ============= CASE 3: invalid year =============
+} else {
+  throw new Error('Year must be 1985 or later.');
+}
+
+// MAP
+Map.addLayer(settlementImage, settlementVis, 'Settlements ' + year + ' (' + datasetUsed + ')');
+
+// for WSF
+var yearsWSF = ee.List.sequence(1985, 2014, 5);   // every 5 years
+// for Dynamic World
+var yearsDW = ee.List.sequence(2015, 2025, 2);    // every 2 years
+
+// function settlement area (km2) for a watershed and a year
+function getSettlementAreaFeature(basinGeom, y) {
+  y = ee.Number(y);
+  
+  var img;
+  var scale;
+
+  // WSF: 1985-2014
+  img = ee.Image(ee.Algorithms.If(
+    y.lt(2015),
+    wsfEvo.gt(0).and(wsfEvo.lte(y)).selfMask().clip(basinGeom),
+    // Dynamic World: 2015-presente
+    dw.filterDate(
+        ee.Date.fromYMD(y, 1, 1),
+        ee.Date.fromYMD(y.add(1), 1, 1)
+      )
+      .select('built')
+      .median()
+      .gt(0.5)
+      .selfMask()
+      .clip(basinGeom)
+  ));
+
+  scale = ee.Number(ee.Algorithms.If(y.lt(2015), 30, 30));
+
+  var areaImg = ee.Image.pixelArea()
+    .updateMask(img)
+    .divide(1e6); // km2
+
+  var area = areaImg.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: basinGeom,
+    scale: scale,
+    maxPixels: 1e13,
+    tileScale: 4,
+    bestEffort: true
+  }).get('area');
+
+  return ee.Feature(null, {
+    year: y,
+    settlement_km2: area
+  });
+}
+
+// click on map ==========================================================================================
+Map.onClick(function(coords) {
+  var point = ee.Geometry.Point([coords.lon, coords.lat]);
+  var clickedBasin = basinsStudy.filterBounds(point).first();
+
+  // identify watershed
+  clickedBasin.evaluate(function(basinInfo) {
+    if (basinInfo === null) {
+      print('No basin found at clicked point.');
+      return;
+    }
+
+    // clean
+    print('Clicked basin:', clickedBasin);
+
+    var basinGeom = clickedBasin.geometry();
+
+    // complete serie: WSF + Dynamic World
+    var fcWSF = ee.FeatureCollection(yearsWSF.map(function(y) {
+      return getSettlementAreaFeature(basinGeom, y);
+    }));
+
+    var fcDW = ee.FeatureCollection(yearsDW.map(function(y) {
+      return getSettlementAreaFeature(basinGeom, y);
+    }));
+
+    var growthSeries = fcWSF.merge(fcDW).sort('year');
+
+    var chart = ui.Chart.feature.byFeature({
+      features: growthSeries,
+      xProperty: 'year',
+      yProperties: ['settlement_km2']
+    })
+    .setChartType('LineChart')
+    .setOptions({
+      title: 'Settlement growth in clicked basin (km²)',
+      hAxis: {title: 'Year'},
+      vAxis: {title: 'Settlement area (km²)'},
+      lineWidth: 2,
+      pointSize: 3,
+      legend: {position: 'none'}
+    });
+
+    print(chart);
+  });
+});

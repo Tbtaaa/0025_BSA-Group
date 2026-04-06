@@ -1,0 +1,145 @@
+// ============================================================
+// CORDILLERA BLANCA — GLACIER-DEPENDENT LAND COVER EXPOSURE
+// Water Scarcity Exposure +Index — Land Cover Component
+// ============================================================
+Map.setOptions('HYBRID');
+
+// Define the study area bounding box for the Cordillera Blanca
+var cordilleraBlanca = ee.Geometry.Rectangle([-77.8, -10.0, -77.0, -8.5]);
+
+// Load the SRTM Digital Elevation Model (30m resolution) and clip to study area.
+// The DEM is used to define an elevation mask that restricts the exposure
+// analysis to the altitudinal range where Andean farming communities
+// actually operate (2000–3800 m). Without this mask, MapBiomas land cover
+// classes would include high-altitude pixels (>3800 m) that are ecologically
+// implausible as cultivated land, and low-lying areas (<2000 m) that are
+// not glacier-dependent. The elevation filter ensures that only communities
+// whose livelihoods are directly linked to glacier-fed irrigation are captured.
+var dem = ee.Image("USGS/SRTMGL1_003").clip(cordilleraBlanca);
+var agriElev = dem.gte(2000).and(dem.lte(3800));
+
+// ============================================================
+// MAPBIOMAS PERU COLLECTION 3 — annual land cover up to 2024
+// ============================================================
+var mapbiomas = ee.Image(
+  'projects/mapbiomas-public/assets/peru/collection3/mapbiomas_peru_collection3_integration_v1'
+).clip(cordilleraBlanca);
+
+// Inspect available band names — should include up to classification_2024
+print('MapBiomas Collection 3 bands:', mapbiomas.bandNames());
+
+// Select the most recent available classification year
+var mapaAnio = mapbiomas.select('classification_2024');
+
+// Inspect land cover classes present in the study area.
+// Use this to verify which classes actually appear before masking.
+var histograma = mapaAnio.reduceRegion({
+  reducer: ee.Reducer.frequencyHistogram(),
+  geometry: cordilleraBlanca,
+  scale: 30,
+  maxPixels: 1e13
+});
+print('Land cover classes present in 2024:', histograma);
+
+// ============================================================
+// GLACIER-DEPENDENT LAND COVER CLASSES
+// These are the classes most exposed to water scarcity from glacier retreat.
+// All rely on glacial meltwater during the dry season (May-September).
+//
+//   Class 21 = Agriculture and pasture mosaic — irrigated cropland
+//   Class 15 = Managed pastures — livestock farming dependent on meltwater
+//   Class 11 = Wetlands / bofedales — highly sensitive to glacial decline,
+//              among the first ecosystems to dry out as glaciers shrink
+//   Class 12 = Puna grasslands — glacier-fed vegetation in the dry season
+//   Class 34 = Glaciers — included for spatial reference
+//
+// Note: verify class codes against the histogram printed above,
+// as class definitions may shift between MapBiomas collection versions.
+// ============================================================
+var mosaico         = mapaAnio.eq(21); // Agriculture and pasture mosaic
+var pastosManejados = mapaAnio.eq(15); // Managed pastures
+var bofedales       = mapaAnio.eq(11); // Wetlands / bofedales — glacier-dependent
+var pajonales       = mapaAnio.eq(12); // Puna grasslands — glacier-fed in dry season
+var glaciares       = mapaAnio.eq(34); // Glaciers (reference layer)
+
+// All glacier-dependent land cover combined, restricted to the
+// altitudinal band where glacier-fed water stress is most relevant
+var allExposed = mosaico
+  .or(pastosManejados)
+  .or(bofedales)
+  .or(pajonales)
+  .and(agriElev);
+
+// ============================================================
+// HYDROSHEDS — Watershed Boundaries (Level 7)
+// ============================================================
+var hydroBasins = ee.FeatureCollection("WWF/HydroSHEDS/v1/Basins/hybas_12")
+  .filterBounds(cordilleraBlanca);
+
+
+// ============================================================
+// VISUALIZATION
+// ============================================================
+Map.centerObject(cordilleraBlanca, 9);
+
+// Study area boundary
+Map.addLayer(
+  ee.Image().paint(ee.FeatureCollection([ee.Feature(cordilleraBlanca)]), 1, 2),
+  {palette: ['FF0000']},
+  'Study Area'
+);
+
+// HydroSHEDS basin boundaries (Level 7)
+Map.addLayer(
+  ee.Image().paint(hydroBasins, 1, 1),
+  {palette: ['4444FF']},
+  'HydroSHEDS Basins Level 7'
+);
+
+// Agriculture and pasture mosaic (Class 21) within elevation mask
+Map.addLayer(
+  mosaico.and(agriElev).selfMask(),
+  {palette: ['FFD700']},
+  'Agriculture and pasture mosaic (Class 21)',
+  true, 0.8
+);
+
+// Managed pastures (Class 15) within elevation mask
+Map.addLayer(
+  pastosManejados.and(agriElev).selfMask(),
+  {palette: ['FF8C00']},
+  'Managed pastures (Class 15)',
+  true, 0.8
+);
+
+// Wetlands / bofedales (Class 11) — most sensitive to glacial retreat
+Map.addLayer(
+  bofedales.and(agriElev).selfMask(),
+  {palette: ['00BFFF']},
+  'Wetlands / Bofedales (Class 11)',
+  true, 0.8
+);
+
+// Puna grasslands (Class 12) — glacier-fed in dry season
+Map.addLayer(
+  pajonales.and(agriElev).selfMask(),
+  {palette: ['90EE90']},
+  'Puna grasslands (Class 12)',
+  true, 0.8
+);
+
+// Glaciers from MapBiomas 2024 (Class 34) — reference layer
+Map.addLayer(
+  glaciares.selfMask(),
+  {palette: ['00FFFF']},
+  'Glaciers MapBiomas 2024 (Class 34)',
+  true, 0.8
+);
+
+// All glacier-dependent land cover combined
+Map.addLayer(
+  allExposed.selfMask(),
+  {palette: ['f096ff']},
+  'All glacier-dependent land cover (Classes 21 + 15 + 11 + 12)',
+  false, 0.7
+);

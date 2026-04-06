@@ -1,0 +1,566 @@
+// VER
+// 1. Sentinel vs Landsat
+// 2. Polígonos cuencas
+// 3. Meses
+
+
+// =====================================================
+// STEP 1: DEFINE THE ROI — CORDILLERA BLANCA, PERU
+// =====================================================
+
+var cordilleraBlanca = ee.Geometry.Polygon([
+  [
+    [-77.80, -8.50],   // Northwest corner
+    [-76.90, -8.50],   // Northeast corner
+    [-76.90, -9.90],   // Southeast corner
+    [-77.80, -9.90],   // Southwest corner
+    [-77.80, -8.50]    // Close the polygon (same as first point)
+  ]
+]);
+
+// -------------------------------------------------------
+// VISUALIZE THE ROI ON THE MAP
+// -------------------------------------------------------
+
+// Center the map on our area of interest
+// Arguments: (center coordinates, zoom level)
+//Map.setCenter(-77.35, -9.10, 9);
+
+// Add the polygon layer to the map
+// Arguments: (geometry, visual parameters, layer name)
+//Map.addLayer(cordilleraBlanca, {color: 'blue'}, 'ROI — Cordillera Blanca');
+
+// -------------------------------------------------------
+// PRINT ROI INFORMATION TO THE CONSOLE
+// -------------------------------------------------------
+
+// Calculate and display the area of the ROI in km²
+var area = cordilleraBlanca.area().divide(1e6); // Convert m² to km²
+print('ROI Area (km²):', area);
+
+// =====================================================
+// STEP 2: LOAD AND FILTER SENTINEL-2 IMAGERY
+// =====================================================
+
+// -------------------------------------------------------
+// WHICH SENTINEL-2 COLLECTION TO USE?
+// -------------------------------------------------------
+// There are two options in GEE:
+//
+//   'COPERNICUS/S2_SR_HARMONIZED'  ← Surface Reflectance (use this)
+//   'COPERNICUS/S2_HARMONIZED'     ← Top of Atmosphere (TOA)
+//
+// Surface Reflectance (SR) has already been corrected for
+// atmospheric effects (aerosols, water vapor, etc.).
+// This is essential for glacier work — atmospheric correction
+// removes artifacts that could be mistaken for snow/ice.
+// Always use SR for any land surface analysis.
+
+// -------------------------------------------------------
+// CLOUD MASKING FUNCTION
+// -------------------------------------------------------
+// Sentinel-2 SR includes a Scene Classification Layer (SCL)
+// band that labels each pixel by surface type.
+// We use it to mask out clouds, cloud shadows, and saturated
+// pixels BEFORE doing any calculations.
+// This is more precise than the simple CLOUD_COVER filter
+// we used with Landsat, which only gives a scene-level %.
+
+function maskS2clouds(image) {
+  var scl = image.select('SCL');
+
+  // SCL values we want to KEEP:
+  // 4 = vegetation, 5 = bare soil, 6 = water,
+  // 7 = unclassified, 11 = snow/ice  ← most important for us
+  var validPixels = scl.eq(4)   // vegetation
+    .or(scl.eq(5))              // bare soil / rock
+    .or(scl.eq(6))              // water
+    .or(scl.eq(7))              // unclassified
+    .or(scl.eq(11));            // snow and ice  ← keep this!
+
+  // Apply the mask: pixels not in the valid set become NoData
+  return image.updateMask(validPixels);
+}
+
+// -------------------------------------------------------
+// LOAD AND FILTER THE SENTINEL-2 COLLECTION
+// -------------------------------------------------------
+
+var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(cordilleraBlanca)                      // Spatial filter: our ROI
+  .filter(ee.Filter.calendarRange(6, 9, 'month'))      // Dry season: June–September
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) // Scene-level pre-filter
+  .filterDate('2019-01-01', '2025-12-31')              // Full Sentinel-2 archive
+  .map(maskS2clouds);                                  // Apply pixel-level cloud mask
+
+// -------------------------------------------------------
+// IMPORTANT: BAND NAMES IN SENTINEL-2
+// -------------------------------------------------------
+// Unlike Landsat (which uses SR_B1, SR_B2...),
+// Sentinel-2 uses descriptive band names:
+//
+//   Band name  | Description        | Resolution
+//   -----------|--------------------|-----------
+//   B2         | Blue               | 10 m
+//   B3         | Green              | 10 m  ← used in NDSI numerator
+//   B4         | Red                | 10 m
+//   B8         | NIR                | 10 m
+//   B11        | SWIR 1 (~1600 nm)  | 20 m  ← used in NDSI denominator
+//   B12        | SWIR 2 (~2200 nm)  | 20 m
+//   SCL        | Scene classif.     | 20 m  (used for cloud masking above)
+//
+// NOTE: B3 (Green) is at 10m, B11 (SWIR) is at 20m.
+// When GEE computes NDSI using both, it resamples B11 to 10m.
+// This gives a 10m-looking output, but effective resolution
+// is still 20m — the SWIR is the limiting factor.
+
+// -------------------------------------------------------
+// BUILD ANNUAL MEDIAN COMPOSITES
+// -------------------------------------------------------
+// Instead of one single median for 10 years, we build one
+// clean composite per year. This lets us track changes
+// over time — which is the whole point of the project.
+//
+// We define the years we want to analyze:
+
+var years = [2019, 2020, 2021, 2022, 2023, 2024, 2025];
+
+// I remove [2015 - 2018] due to the lack of images.
+
+// For each year, filter the collection and take the median.
+// .map() here is JavaScript's array map (not GEE's), since
+// we're iterating over a plain JS array of numbers.
+
+var annualComposites = years.map(function(year) {
+  var composite = sentinel2
+    .filter(ee.Filter.calendarRange(year, year, 'year'))
+    .median()                         // Best cloud-free pixel per year
+    .clip(cordilleraBlanca)           // Trim to our ROI
+    .set('year', year);               // Store the year as metadata
+  return composite;
+});
+
+// Convert the JS array into a GEE ImageCollection
+var annualCollection = ee.ImageCollection(annualComposites);
+
+// -------------------------------------------------------
+// INSPECT YOUR COLLECTION IN THE CONSOLE
+// -------------------------------------------------------
+
+print('Sentinel-2 — total images after filtering:', sentinel2.size());
+print('Annual composites collection:', annualCollection);
+
+// Check how many images went into each annual composite.
+// If a year has very few images (< 3), the median may be
+// unreliable — consider widening the cloud filter for that year.
+years.forEach(function(year) {
+  var count = sentinel2
+    .filter(ee.Filter.calendarRange(year, year, 'year'))
+    .size();
+  print('Images in ' + year + ':', count);
+});
+
+// -------------------------------------------------------
+// VISUALIZE ON THE MAP
+// -------------------------------------------------------
+
+Map.setCenter(-77.35, -9.10, 10);
+
+// True color visualization parameters for Sentinel-2
+// (B4=Red, B3=Green, B2=Blue)
+// min/max values are in surface reflectance units (0–10000 scale)
+var trueColorVis = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 200,
+  max: 3000
+};
+
+// False color: swap NIR into the red channel.
+// Glaciers appear bright cyan/white, vegetation bright red.
+// Useful for a quick visual check before computing NDSI.
+var falseColorVis = {
+  bands: ['B8', 'B4', 'B3'],
+  min: 200,
+  max: 4000
+};
+
+// Get the most recent composite (2024) for display
+var latest = annualCollection.filter(ee.Filter.eq('year', 2025)).first();
+var earliest = annualCollection.filter(ee.Filter.eq('year', 2019)).first();
+
+//Map.addLayer(earliest, trueColorVis, '2019 — True color');
+//Map.addLayer(latest,   trueColorVis, '2025 — True color');
+//Map.addLayer(latest,   falseColorVis,'2025 — False color (NIR)');
+
+// =====================================================
+// STEP 3: CALCULATE NDSI AND EXTRACT GLACIER AREA
+// =====================================================
+// NOTE: Steps 1 and 2 must be defined above this code.
+// This step builds directly on the annualCollection
+// variable created in Step 2.
+
+// -------------------------------------------------------
+// THE NDSI FORMULA
+// -------------------------------------------------------
+// The Normalized Difference Snow Index (NDSI) is a satellite
+// remote sensing method used to identify and map snow cove
+// NDSI = (Green - SWIR) / (Green + SWIR)
+//
+// For Sentinel-2:
+//   Green = B3 (10m resolution)
+//   SWIR  = B11 (20m resolution, resampled to 10m by GEE)
+//
+// Output values range from -1 to +1:
+//   > 0.4  → very likely glacier / snow ice
+//   0.2–0.4 → possible glacier (use with caution)
+//   < 0.2  → rock, soil, vegetation, water
+
+// -------------------------------------------------------
+// FUNCTION: COMPUTE NDSI FOR A SINGLE IMAGE
+// -------------------------------------------------------
+// We wrap the NDSI calculation in a function so we can
+// apply it to every image in our annual collection
+// using .map() — one of the most important GEE patterns.
+
+function computeNDSI(image) {
+  var green = image.select('B3');   // Green band (10m)
+  var swir  = image.select('B11');  // SWIR band (20m → resampled to 10m)
+
+  // normalizedDifference(A, B) computes (A - B) / (A + B)
+  // and automatically handles division by zero.
+  var ndsi = image.normalizedDifference(['B3', 'B11'])
+    .rename('NDSI');                // Name the output band 'NDSI'
+
+  // Add the NDSI as a new band to the original image,
+  // and carry forward the 'year' metadata property.
+  return image.addBands(ndsi)
+    .set('year', image.get('year'));
+}
+
+// -------------------------------------------------------
+// APPLY NDSI FUNCTION TO ALL ANNUAL COMPOSITES
+// -------------------------------------------------------
+// .map() applies our function to every image in the
+// collection and returns a new collection with NDSI added.
+
+var ndsiCollection = annualCollection.map(computeNDSI);
+
+print('NDSI collection (one image per year):', ndsiCollection);
+
+// -------------------------------------------------------
+// FUNCTION: APPLY THRESHOLD AND EXTRACT GLACIER MASK
+// -------------------------------------------------------
+// A threshold of 0.4 is the standard in glaciology.
+// Pixels with NDSI >= 0.4 are classified as glacier/snow.
+// The result is a binary mask: 1 = glacier, 0 = not glacier.
+
+function extractGlaciers(image) {
+  var ndsi = image.select('NDSI');
+
+  // Create binary glacier mask
+  var glacierMask = ndsi.gte(0.35).rename('glacier');
+
+  // ---- ADDITIONAL FILTER: remove water bodies ----
+  // Water also has low SWIR reflectance, which can push
+  // its NDSI above 0.4 in some conditions (lakes, rivers).
+  // We use the NIR band to separate ice from water:
+  // ice reflects NIR strongly, water absorbs it almost entirely.
+  var nir = image.select('B8');
+  var notWater = nir.gt(0.1);  // NIR > 10% reflectance = not water
+                                // (S2 reflectance values are 0–1 after
+                                //  dividing by 10000 — see note below)
+
+  // NOTE: Sentinel-2 SR values are stored as integers (0–10000).
+  // To compare to physical reflectance (0–1), we need to account
+  // for this scaling. 0.1 in physical units = 1000 in raw units.
+  // Let's use raw units to stay consistent with the image data:
+  var notWaterRaw = nir.gt(1000); // NIR > 1000 (= 10% reflectance)
+
+  // Combine glacier mask with water exclusion
+  glacierMask = glacierMask.and(notWaterRaw).rename('glacier');
+
+  return image.addBands(glacierMask)
+    .set('year', image.get('year'));
+}
+
+// Apply to the NDSI collection
+var glacierCollection = ndsiCollection.map(extractGlaciers);
+
+// -------------------------------------------------------
+// FUNCTION: CALCULATE GLACIER AREA PER YEAR (km²)
+// -------------------------------------------------------
+// For each annual image, we count glacier pixels and
+// convert to km² based on pixel size (10m × 10m = 100m²).
+
+function calculateArea(image) {
+  var glacierMask = image.select('glacier');
+
+  // ee.Image.pixelArea() returns the area of each pixel in m².
+  // Multiplying by the glacier mask keeps only glacier pixels.
+  var area = glacierMask
+    .multiply(ee.Image.pixelArea())     // Each pixel = area in m²
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),        // Sum all glacier pixel areas
+      geometry: cordilleraBlanca,       // Within our ROI
+      scale: 20,                        // Use 20m scale (SWIR limit)
+      maxPixels: 1e10                   // Allow large computations
+    });
+
+  // Convert m² to km² and return as a Feature (table row)
+  var areaKm2 = ee.Number(area.get('glacier')).divide(1e6);
+
+  return ee.Feature(null, {
+    'year':     image.get('year'),
+    'area_km2': areaKm2
+  });
+}
+
+// Apply to glacier collection → produces a FeatureCollection
+// (think of it as a table: one row per year)
+var glacierAreas = ee.FeatureCollection(
+  glacierCollection.map(calculateArea)
+);
+
+print('Glacier areas by year:', glacierAreas);
+
+// -------------------------------------------------------
+// VISUALIZE NDSI AND GLACIER MASK ON THE MAP
+// -------------------------------------------------------
+
+// NDSI visualization: blue = low NDSI, white = high NDSI
+var ndsiVis = {
+  bands: ['NDSI'],
+  min: -0.5,
+  max: 1.0,
+  palette: ['#1a237e', '#42a5f5', '#ffffff']
+};
+
+// Glacier mask visualization: glaciers in cyan
+var glacierVis = {
+  bands: ['glacier'],
+  min: 0,
+  max: 1,
+  palette: ['00000000', '#00e5ff']  // transparent = no glacier, cyan = glacier
+};
+
+// Get 2015 and 2025 for visual comparison
+var ndsi2019   = glacierCollection.filter(ee.Filter.eq('year', 2019)).first();
+var ndsi2025   = glacierCollection.filter(ee.Filter.eq('year', 2025)).first();
+
+//Map.addLayer(ndsi2019, ndsiVis,    '2019 — NDSI values');
+//Map.addLayer(ndsi2019, glacierVis, '2019 — Glacier mask');
+//Map.addLayer(ndsi2025, ndsiVis,    '2025 — NDSI values');
+//Map.addLayer(ndsi2025, glacierVis, '2025 — Glacier mask');
+
+// -------------------------------------------------------
+// CHART: GLACIER AREA OVER TIME
+// -------------------------------------------------------
+// This creates an interactive time series chart in GEE
+// showing glacier area (km²) for each year.
+
+var chart = ui.Chart.feature.byFeature({
+  features:  glacierAreas,
+  xProperty: 'year',
+  yProperties: ['area_km2']
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Glacier area — Cordillera Blanca (2019–2025)',
+  hAxis: { title: 'Year', format: '####' },
+  vAxis: { title: 'Area (km²)' },
+  lineWidth: 2,
+  pointSize: 5,
+  colors: ['#00e5ff'],
+  backgroundColor: '#1a1a2e'
+});
+
+print(chart);
+
+// =====================================================
+// STEP 4: VALIDATION AND SENSITIVITY ANALYSIS
+// =====================================================
+// This step has two goals:
+//   1. Validate your glacier masks visually and numerically
+//   2. Run a sensitivity analysis on the NDSI threshold
+
+// -------------------------------------------------------
+// 4.1 — VISUAL VALIDATION
+// -------------------------------------------------------
+// The first validation is always visual: do your glacier
+// masks actually align with where glaciers are?
+// We overlay three layers and compare them:
+//   A) True color image (what the sensor sees)
+//   B) False color image (NIR highlights ice clearly)
+//   C) Your glacier mask (cyan overlay)
+
+var vis2025 = glacierCollection
+  .filter(ee.Filter.eq('year', 2025))
+  .first();
+
+// True color: natural appearance
+Map.addLayer(vis2025,
+  {bands: ['B4','B3','B2'], min: 200, max: 3000},
+  '2025 — True color');
+
+// False color: ice appears bright cyan/white,
+// vegetation appears red — great for spotting glaciers
+Map.addLayer(vis2025,
+  {bands: ['B8','B4','B3'], min: 200, max: 4000},
+  '2025 — False color');
+
+// NDSI grayscale: bright white = high NDSI = glacier
+Map.addLayer(vis2025,
+  {bands: ['NDSI'], min: 0, max: 1, palette: ['black','white']},
+  '2025 — NDSI grayscale');
+
+// Glacier mask: cyan = classified as glacier
+Map.addLayer(vis2025,
+  {bands: ['glacier'], min: 0, max: 1,
+   palette: ['00000000', '#00e5ff']},
+  '2025 — Glacier mask (threshold 0.4)');
+
+// -------------------------------------------------------
+// 4.2 — NUMERICAL VALIDATION AGAINST INAIGEM / RGI
+// -------------------------------------------------------
+// The Randolph Glacier Inventory (RGI) is available
+// directly in GEE as an asset. We use it to compare
+// our mapped glacier area against an official reference.
+//
+// The RGI region code for the tropical Andes (which
+// includes the Cordillera Blanca) is region '16'.
+
+var rgi = ee.FeatureCollection("projects/sat-io/open-datasets/RGI/RGI_VECTOR_MERGED_V7")
+  .filterBounds(cordilleraBlanca);
+
+// Calculate RGI reference area in km²
+var rgiArea = rgi.geometry().area().divide(1e6);
+print('RGI reference glacier area (km²):', rgiArea);
+
+// Add RGI outlines to the map as a reference layer
+Map.addLayer(rgi,
+  {color: 'red'},
+  'RGI glacier outlines (reference)');
+
+// Compare your 2020 mask area to the RGI
+// (RGI ~2000s vintage, so use your earliest year)
+var area2019 = glacierAreas
+  .filter(ee.Filter.eq('year', 2019))
+  .first()
+  .get('area_km2');
+
+print('Your mapped area 2019 (km²):', area2019);
+
+// -------------------------------------------------------
+// 4.3 — SENSITIVITY ANALYSIS ON THE NDSI THRESHOLD
+// -------------------------------------------------------
+// We test three thresholds: 0.3, 0.4, and 0.5
+// and compare the resulting glacier areas for 2025.
+// This shows how sensitive your results are to this
+// methodological choice — important for your discussion.
+
+var thresholds = [0.35, 0.4, 0.5];
+
+// Get the 2024 NDSI image
+var ndsi2025 = ndsiCollection
+  .filter(ee.Filter.eq('year', 2025))
+  .first();
+
+// For each threshold, compute glacier area
+var sensitivityResults = thresholds.map(function(t) {
+  // Apply NIR water filter (same as Step 3)
+  var mask = ndsi2025.select('NDSI').gte(t)
+    .and(ndsi2025.select('B8').gt(1000))
+    .rename('glacier');
+
+  var area = mask
+    .multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer:   ee.Reducer.sum(),
+      geometry:  cordilleraBlanca,
+      scale:     20,
+      maxPixels: 1e10
+    });
+
+  var areaKm2 = ee.Number(area.get('glacier')).divide(1e6);
+
+  return ee.Feature(null, {
+    'threshold': t,
+    'area_km2':  areaKm2
+  });
+});
+
+var sensitivityFC = ee.FeatureCollection(sensitivityResults);
+print('Sensitivity analysis — 2025 glacier area by threshold:',
+      sensitivityFC);
+
+// Chart the sensitivity results
+var sensitivityChart = ui.Chart.feature.byFeature({
+  features:    sensitivityFC,
+  xProperty:   'threshold',
+  yProperties: ['area_km2']
+})
+.setChartType('ColumnChart')
+.setOptions({
+  title:  'Glacier area sensitivity to NDSI threshold (2025)',
+  hAxis:  { title: 'NDSI threshold' },
+  vAxis:  { title: 'Glacier area (km²)' },
+  colors: ['#00e5ff'],
+  legend: { position: 'none' }
+});
+
+print(sensitivityChart);
+
+// -------------------------------------------------------
+// 4.4 — ACCURACY METRICS (Confusion Matrix approach)
+// -------------------------------------------------------
+// We sample random points over the ROI, classify them
+// manually using the false color image, and compare
+// against what our algorithm says.
+//
+// This is the most rigorous validation step.
+// It produces Producer's Accuracy, User's Accuracy,
+// and Overall Accuracy — standard metrics in remote sensing.
+
+// Step 1: Generate stratified random sample points
+// (50 glacier points + 50 non-glacier points)
+var glacierMask2025 = vis2025.select('glacier');
+
+var samplePoints = glacierMask2025.stratifiedSample({
+  numPoints:   50,          // 50 points per class
+  classBand:   'glacier',
+  region:      cordilleraBlanca,
+  scale:       20,
+  geometries:  true         // Keep point geometry for map display
+});
+
+print('Sample points for accuracy assessment:', samplePoints);
+
+// Add sample points to the map so you can inspect them
+// visually and record "ground truth" values
+Map.addLayer(samplePoints,
+  {color: 'yellow'},
+  'Validation sample points');
+
+// -------------------------------------------------------
+// 4.5 — PRINT SUMMARY STATISTICS FOR ALL YEARS
+// -------------------------------------------------------
+
+print('=== GLACIER AREA SUMMARY (2019–2025) ===');
+print('Annual glacier areas (km²):', glacierAreas);
+
+// Compute total change between first and last year
+var area2019val = ee.Number(
+  glacierAreas.filter(ee.Filter.eq('year', 2019))
+    .first().get('area_km2'));
+
+var area2025val = ee.Number(
+  glacierAreas.filter(ee.Filter.eq('year', 2025))
+    .first().get('area_km2'));
+
+var absoluteChange = area2025val.subtract(area2019val);
+var percentChange  = absoluteChange.divide(area2019val).multiply(100);
+
+print('Area 2019 (km²):', area2019val);
+print('Area 2025 (km²):', area2025val);
+print('Absolute change (km²):', absoluteChange);
+print('Percent change (%):', percentChange);

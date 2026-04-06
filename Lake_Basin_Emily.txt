@@ -1,0 +1,792 @@
+// ════════════════════════════════════════════════════════════════
+// EMILY — Glacial Lake Basin Change Detection
+// Cordillera Blanca, Peru
+// Method: JRC Global Surface Water (1990–2021)
+//         Dry season filter · elevation mask
+//         Welch t-test on annual lake area
+//         Slope: 500m buffer + SLA + max slope + % steep terrain
+// References: Pekel et al. (2016), Rounce et al. (2017)
+//             Fujita et al. (2013), Emmer et al. (2022)
+//             Carrivick & Tweed (2016)
+// ════════════════════════════════════════════════════════════════
+
+// ── 1. STUDY AREA ────────────────────────────────────────────────
+var studyArea = ee.Geometry.Rectangle([-77.8, -10.2, -77.1, -8.8]);
+Map.centerObject(studyArea, 10);
+Map.setOptions('TERRAIN');
+
+// ── 2. PARAMETERS ────────────────────────────────────────────────
+var START_YEAR  = 1990;
+var END_YEAR    = 2021;
+var SPLIT_YEAR  = 2007;
+var MIN_AREA_M2 = 5000;
+var ELEV_MIN    = 3800;
+var ELEV_MAX    = 6800;
+
+// T-test results — hardcoded from completed analysis
+var PERIOD1_MEAN = 32.267;
+var PERIOD2_MEAN = 35.465;
+var PCT_CHANGE   = 9.9;
+var T_STATISTIC  = 6.682;
+
+// ── 3. BASE LAYERS ────────────────────────────────────────────────
+var dem        = ee.Image('USGS/SRTMGL1_003').clip(studyArea);
+var slope      = ee.Terrain.slope(dem);
+var elevMask   = dem.gte(ELEV_MIN).and(dem.lte(ELEV_MAX));
+var jrcMonthly = ee.ImageCollection('JRC/GSW1_4/MonthlyHistory');
+
+// ── 4. JRC WATER MASK ────────────────────────────────────────────
+function getJRCWaterMask(year) {
+  var start = ee.Date.fromYMD(year, 6, 1);
+  var end   = ee.Date.fromYMD(year, 9, 30);
+  return jrcMonthly
+    .filterDate(start, end)
+    .map(function(img) { return img.eq(2); })
+    .max()
+    .clip(studyArea)
+    .eq(1)
+    .and(elevMask)
+    .rename('water');
+}
+
+// ── 5. VISUAL TEST ────────────────────────────────────────────────
+var test1990 = getJRCWaterMask(1990);
+var test2021 = getJRCWaterMask(2021);
+
+Map.addLayer(test1990.selfMask(), {palette:['00FFFF']}, 'Lakes 1990 (cyan)');
+Map.addLayer(test2021.selfMask(), {palette:['0000FF']}, 'Lakes 2021 (blue)');
+Map.addLayer(elevMask.selfMask(), {palette:['00FF00']}, 'Elevation mask', false);
+
+print('1990 area km²:', ee.Number(
+  test1990.reduceRegion({reducer:ee.Reducer.sum(),geometry:studyArea,
+    scale:30,maxPixels:1e10,bestEffort:true}).get('water')).multiply(0.0009));
+print('2021 area km²:', ee.Number(
+  test2021.reduceRegion({reducer:ee.Reducer.sum(),geometry:studyArea,
+    scale:30,maxPixels:1e10,bestEffort:true}).get('water')).multiply(0.0009));
+
+// ════════════════════════════════════════════════════════════════
+// STOP HERE — confirm map then run below
+// ════════════════════════════════════════════════════════════════
+
+// ── 6. ANNUAL TIME SERIES — batched in groups of 4 ───────────────
+function getJRCAreaForYear(y) {
+  y = ee.Number(y).int();
+  var count = getJRCWaterMask(y).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   studyArea,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  });
+  var area = ee.Algorithms.If(
+    count.get('water'),
+    ee.Number(count.get('water')).multiply(0.0009),
+    ee.Number(0)
+  );
+  return ee.Feature(null, {
+    'year':           y,
+    'total_area_km2': area,
+    'method':         'JRC'
+  });
+}
+
+var b1 = ee.FeatureCollection([1990,1991,1992,1993].map(getJRCAreaForYear));
+var b2 = ee.FeatureCollection([1994,1995,1996,1997].map(getJRCAreaForYear));
+var b3 = ee.FeatureCollection([1998,1999,2000,2001].map(getJRCAreaForYear));
+var b4 = ee.FeatureCollection([2002,2003,2004,2005].map(getJRCAreaForYear));
+var b5 = ee.FeatureCollection([2006,2007,2008,2009].map(getJRCAreaForYear));
+var b6 = ee.FeatureCollection([2010,2011,2012,2013].map(getJRCAreaForYear));
+var b7 = ee.FeatureCollection([2014,2015,2016,2017].map(getJRCAreaForYear));
+var b8 = ee.FeatureCollection([2018,2019,2020,2021].map(getJRCAreaForYear));
+
+var annualStats = b1.merge(b2).merge(b3).merge(b4)
+                   .merge(b5).merge(b6).merge(b7).merge(b8);
+
+print('Annual stats total:', annualStats.size());
+
+// ── 7. T-TEST + CHART ─────────────────────────────────────────────
+annualStats.evaluate(function(result) {
+  if (!result || !result.features || result.features.length === 0) {
+    print('ERROR: Annual stats failed');
+    return;
+  }
+  print('Years computed:', result.features.length);
+
+  var p1 = [], p2 = [];
+  result.features.forEach(function(f) {
+    var yr   = f.properties.year;
+    var area = f.properties.total_area_km2 || 0;
+    if (yr < SPLIT_YEAR) p1.push(area);
+    else                 p2.push(area);
+  });
+
+  function mean(a) { return a.reduce(function(s,v){return s+v;},0)/a.length; }
+  function variance(a) {
+    var m = mean(a);
+    return a.reduce(function(s,v){return s+Math.pow(v-m,2);},0)/(a.length-1);
+  }
+
+  var m1=mean(p1), m2=mean(p2);
+  var v1=variance(p1), v2=variance(p2);
+  var n1=p1.length, n2=p2.length;
+  var se    = Math.sqrt(v1/n1+v2/n2);
+  var t     = (m2-m1)/se;
+  var num   = Math.pow(v1/n1+v2/n2,2);
+  var denom = Math.pow(v1/n1,2)/(n1-1)+Math.pow(v2/n2,2)/(n2-1);
+  var df    = num/denom;
+  var pct   = ((m2-m1)/m1)*100;
+  var sig   = Math.abs(t)>2.0
+    ? 'SIGNIFICANT — lake area has changed (p < 0.05)'
+    : 'Not significant at p < 0.05';
+
+  print('════ WELCH T-TEST RESULTS ════');
+  print('Period 1 ('+START_YEAR+'–'+(SPLIT_YEAR-1)+') mean: '+m1.toFixed(3)+' km²');
+  print('Period 2 ('+SPLIT_YEAR+'–'+END_YEAR+') mean: '+m2.toFixed(3)+' km²');
+  print('Change: '+pct.toFixed(1)+'%');
+  print('t-statistic: '+t.toFixed(3));
+  print('Degrees of freedom: '+df.toFixed(1));
+  print('Result: '+sig);
+
+  var chart = ui.Chart.feature.byFeature(
+    ee.FeatureCollection(result.features.map(function(f){
+      return ee.Feature(null, f.properties);
+    })), 'year', 'total_area_km2')
+    .setChartType('LineChart')
+    .setOptions({
+      title:     'Total glacial lake area — Cordillera Blanca (dry season)',
+      hAxis:     {title:'Year', format:'####'},
+      vAxis:     {title:'Total area (km²)'},
+      lineWidth: 2, pointSize: 4,
+      colors:    ['#1a73e8']
+    });
+  print(chart);
+});
+
+// ── 8. LAKE POLYGONS ─────────────────────────────────────────────
+function getJRCLakes(year) {
+  var waterMask = getJRCWaterMask(year).selfMask();
+  var lakes = waterMask.reduceToVectors({
+    geometry:       studyArea,
+    scale:          30,
+    geometryType:   'polygon',
+    eightConnected: false,
+    labelProperty:  'water',
+    bestEffort:     true,
+    maxPixels:      1e10
+  });
+  return lakes.map(function(f) {
+    var area = f.geometry().area(1);
+    return f.set({
+      'area_m2':  area,
+      'area_km2': ee.Number(area).divide(1e6),
+      'year':     year
+    });
+  }).filter(ee.Filter.gte('area_m2', MIN_AREA_M2));
+}
+
+var earlyLakes = getJRCLakes(START_YEAR);
+var lateLakes  = getJRCLakes(END_YEAR);
+
+// ── 9. PER-LAKE GROWTH + SLOPE METRICS + SLA ─────────────────────
+// Four slope metrics following Rounce et al. (2017) and Fujita et al. (2013):
+// 1. Mean slope within 500m of lake — avalanche/rockfall trigger risk
+// 2. Max slope within 500m — worst-case failure zone
+// 3. % terrain >25° within 500m — overall instability
+// 4. SLA within 1000m — moraine stability (Fujita et al. 2013 threshold: 10°)
+
+var joined = ee.Join.saveFirst('early_match').apply({
+  primary:   lateLakes,
+  secondary: earlyLakes,
+  condition: ee.Filter.intersects({
+    leftField:'.geo', rightField:'.geo', maxError:10
+  })
+});
+
+var lakeGrowthStats = joined.map(function(f) {
+  var lakeGeom  = f.geometry();
+  var earlyArea = ee.Number(ee.Feature(f.get('early_match')).get('area_km2'));
+  var lateArea  = ee.Number(f.get('area_km2'));
+  var pctChange = lateArea.subtract(earlyArea).divide(earlyArea).multiply(100);
+
+  // ── METRIC 1 — mean slope within 500m ────────────────────────
+  // Primary avalanche/rockfall trigger risk indicator
+  // Rounce et al. (2017): immediate terrain steepness drives GLOF probability
+  var lakeBuffer500m = lakeGeom.buffer(500);
+  var slope500m = ee.Number(slope.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   lakeBuffer500m,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+
+  // ── METRIC 2 — max slope within 500m ─────────────────────────
+  // Worst-case failure zone — single steep cliff above lake
+  var slopeMax = ee.Number(slope.reduceRegion({
+    reducer:    ee.Reducer.max(),
+    geometry:   lakeBuffer500m,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+
+  // ── METRIC 3 — % terrain >25° within 500m ────────────────────
+  // Proportion of unstable terrain surrounding lake
+  // >25° threshold: Rounce et al. (2017) rockfall prone areas
+  var steepPixels = ee.Number(slope.gt(25).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   lakeBuffer500m,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+  var totalPixels = ee.Number(slope.gt(0).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   lakeBuffer500m,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 1));
+  var pctSteepTerrain = steepPixels.divide(totalPixels).multiply(100);
+
+  // ── METRIC 4 — SLA (Steep Lakefront Area) within 1000m ───────
+  // Average slope between lake and any point within 1000m
+  // Fujita et al. (2013) via Rounce et al. (2017):
+  // SLA < 10° = moraine stable
+  // SLA > 10° = potentially susceptible to self-destructive failure
+  var lakeBuffer1000m = lakeGeom.buffer(1000);
+  var slaValue = ee.Number(slope.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   lakeBuffer1000m,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+  var slaUnstable = slaValue.gte(10);  // true = potentially unstable moraine
+
+  // ── HAZARD SCORE ──────────────────────────────────────────────
+  // Combines lake size + avalanche slope + moraine stability
+  // Weighted following Rounce et al. (2017) framework:
+  // Lake size: 40%, avalanche slope: 35%, moraine stability (SLA): 25%
+  var lakeScore  = lateArea.divide(2.0).min(1.0);
+  var slopeScore = slope500m.divide(30.0).min(1.0);
+  var slaScore   = slaValue.subtract(10).divide(20).max(0).min(1.0);
+  var hazardScore = lakeScore.multiply(0.4)
+    .add(slopeScore.multiply(0.35))
+    .add(slaScore.multiply(0.25));
+
+  // ── SLOPE RISK CLASSIFICATION ─────────────────────────────────
+  var slopeRisk = ee.Algorithms.If(
+    slope500m.gte(25), 'high',
+    ee.Algorithms.If(slope500m.gte(15), 'medium', 'low')
+  );
+
+  return f.set({
+    'area_1990_km2':     earlyArea,
+    'area_2021_km2':     lateArea,
+    'pct_change':        pctChange,
+    'annual_rate_pct':   pctChange.divide(END_YEAR - START_YEAR),
+    'growing':           lateArea.gt(earlyArea),
+    'slope_500m_deg':    slope500m,
+    'slope_max_deg':     slopeMax,
+    'pct_steep_terrain': pctSteepTerrain,
+    'sla_deg':           slaValue,
+    'sla_unstable':      slaUnstable,
+    'slope_risk':        slopeRisk,
+    'hazard_score':      hazardScore
+  });
+});
+
+print('Per-lake growth + slope + SLA sample:', lakeGrowthStats.limit(5));
+
+// ── 10. VISUALISE ────────────────────────────────────────────────
+Map.addLayer(
+  lakeGrowthStats.filter(ee.Filter.eq('growing', 0)),
+  {color:'27AE60'}, 'Shrinking lakes (green)');
+Map.addLayer(
+  lakeGrowthStats.filter(ee.Filter.eq('growing', 1)),
+  {color:'E74C3C'}, 'Growing lakes (red)');
+
+// Lakes with unstable moraines (SLA > 10°) — highlighted separately
+Map.addLayer(
+  lakeGrowthStats.filter(ee.Filter.eq('sla_unstable', 1)),
+  {color:'FF6600'}, 'Unstable moraine lakes — SLA >10° (orange)');
+
+var lakeGrowthRaster = lakeGrowthStats
+  .filter(ee.Filter.gt('pct_change', 0))
+  .reduceToImage({properties:['pct_change'], reducer:ee.Reducer.mean()})
+  .rename('lake_growth_pct').clip(studyArea);
+
+Map.addLayer(lakeGrowthRaster, {
+  min:0, max:100,
+  palette:['#ffffb2','#fecc5c','#fd8d3c','#f03b20','#bd0026']
+}, 'Lake growth % (yellow=low, red=high)');
+
+// Hazard score raster
+var hazardRaster = lakeGrowthStats
+  .reduceToImage({properties:['hazard_score'], reducer:ee.Reducer.mean()})
+  .rename('hazard_score').clip(studyArea);
+
+Map.addLayer(hazardRaster, {
+  min:0, max:1,
+  palette:['#ffffb2','#fecc5c','#fd8d3c','#f03b20','#bd0026']
+}, 'Hazard score (yellow=low, red=high)', false);
+
+// ── 11. BASIN LAYER + CLICK HANDLER ──────────────────────────────
+var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_12')
+  .filterBounds(studyArea);
+
+var basinOutlines = basins.style({
+  color:'FF0000', fillColor:'00000000', width:1
+});
+Map.addLayer(basinOutlines, {}, 'Basins');
+
+var basinsWithSlope = basins.map(function(basin) {
+  var geom = basin.geometry();
+
+  var meanSlope = ee.Number(slope.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   geom,
+    scale:      90,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+
+  var steepCount = ee.Number(slope.gt(25).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   geom,
+    scale:      90,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+
+  var totalCount = ee.Number(slope.gt(0).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   geom,
+    scale:      90,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 1));
+
+  var pctSteep = steepCount.divide(totalCount).multiply(100);
+
+  return basin.set({
+    'mean_slope': meanSlope,
+    'pct_steep':  pctSteep
+  });
+});
+
+var slopePainted = ee.Image().float().paint({
+  featureCollection: basinsWithSlope,
+  color:             'mean_slope'
+});
+Map.addLayer(slopePainted, {
+  min:5, max:30,
+  palette:['#2ecc71','#f1c40f','#e67e22','#e74c3c']
+}, 'Mean slope per basin', false);
+
+// ── 12. CLICK HANDLER ────────────────────────────────────────────
+Map.onClick(function(coords) {
+  var point = ee.Geometry.Point([coords.lon, coords.lat]);
+  var clickedBasin = basinsWithSlope.filterBounds(point).first();
+
+  clickedBasin.evaluate(function(basin) {
+    if (!basin) { print('Click within the study area'); return; }
+
+    var basinGeom = ee.Feature(basin).geometry();
+    var basinId   = basin.properties.HYBAS_ID;
+    var meanSlope = basin.properties.mean_slope;
+    var pctSteep  = basin.properties.pct_steep;
+
+    Map.layers().reset();
+    Map.addLayer(basinOutlines, {}, 'Basins');
+    Map.addLayer(
+      ee.Image().byte().paint({
+        featureCollection: ee.FeatureCollection([ee.Feature(basinGeom)]),
+        color:1, width:2
+      }),
+      {palette:['FF0000']}, 'Selected basin'
+    );
+    Map.centerObject(basinGeom, 12);
+
+    var lakesInBasin  = lakeGrowthStats.filterBounds(basinGeom);
+    var maxLakeSlope  = lakesInBasin.aggregate_max('slope_500m_deg');
+    var meanHazard    = lakesInBasin.aggregate_mean('hazard_score');
+    var meanSLA       = lakesInBasin.aggregate_mean('sla_deg');
+    var unstableCount = lakesInBasin.filter(ee.Filter.eq('sla_unstable', 1)).size();
+
+    lakesInBasin.size().evaluate(function(lakeCount) {
+      lakesInBasin.aggregate_sum('area_2021_km2').evaluate(function(lakeArea) {
+        maxLakeSlope.evaluate(function(maxSlope) {
+          meanHazard.evaluate(function(hazard) {
+            meanSLA.evaluate(function(sla) {
+              unstableCount.evaluate(function(unstable) {
+
+                var slopeRisk = meanSlope >= 25 ? 'HIGH'
+                              : meanSlope >= 15 ? 'MEDIUM' : 'LOW';
+                var moraineSta = sla && sla >= 10
+                              ? 'POTENTIALLY UNSTABLE (SLA ≥ 10°)'
+                              : 'STABLE (SLA < 10°)';
+
+                print('════ BASIN STATS ════');
+                print('Basin ID:', basinId);
+                print('── Lake statistics ──');
+                print('Lakes in basin:', lakeCount);
+                print('Total lake area 2021:',
+                  lakeArea ? lakeArea.toFixed(3)+' km²' : '0 km²');
+                print('Lake area change (study area): +'+PCT_CHANGE+'%');
+                print('t-statistic: '+T_STATISTIC+' (p < 0.05)');
+                print('── Slope statistics ──');
+                print('Mean basin slope:',
+                  meanSlope ? meanSlope.toFixed(1)+'°' : 'n/a');
+                print('% terrain >25° in basin:',
+                  pctSteep ? pctSteep.toFixed(1)+'%' : 'n/a');
+                print('Max slope near lakes:',
+                  maxSlope ? maxSlope.toFixed(1)+'°' : 'n/a');
+                print('── Moraine stability (SLA) ──');
+                print('Mean SLA in basin:',
+                  sla ? sla.toFixed(1)+'°' : 'n/a');
+                print('Moraine assessment:', moraineSta);
+                print('Lakes with unstable moraine:', unstable);
+                print('── Risk assessment ──');
+                print('Slope risk level:', slopeRisk);
+                print('Mean hazard score:',
+                  hazard ? hazard.toFixed(2)+' / 1.0' : 'n/a');
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+// ── 13. GETEMILYRISKORWATERSHED — for full app ───────────────────
+function getEmilyRiskForWatershed(watershedGeom) {
+  var wsLakes    = lakeGrowthStats.filterBounds(watershedGeom);
+  var meanSlope  = slope.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   watershedGeom,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  });
+  var steepCount = slope.gt(25).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   watershedGeom,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  });
+  var totalCount = slope.gt(0).reduceRegion({
+    reducer:    ee.Reducer.sum(),
+    geometry:   watershedGeom,
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  });
+  return ee.Dictionary({
+    'lake_area_km2':     wsLakes.aggregate_sum('area_2021_km2'),
+    'lake_count':        wsLakes.size(),
+    'mean_hazard':       wsLakes.aggregate_mean('hazard_score'),
+    'slope_500m_max':    wsLakes.aggregate_max('slope_500m_deg'),
+    'mean_sla_deg':      wsLakes.aggregate_mean('sla_deg'),
+    'unstable_lakes':    wsLakes.filter(ee.Filter.eq('sla_unstable',1)).size(),
+    'slope_mean_deg':    meanSlope.get('slope'),
+    'pct_steep_terrain': ee.Number(steepCount.get('slope',0))
+                           .divide(ee.Number(totalCount.get('slope',1)))
+                           .multiply(100),
+    'pct_change':        PCT_CHANGE,
+    'period1_mean_km2':  PERIOD1_MEAN,
+    'period2_mean_km2':  PERIOD2_MEAN,
+    't_statistic':       T_STATISTIC
+  });
+}
+
+// ── 14. SCATTER CHART — slope vs lake growth ─────────────────────
+var basinsWithStats = basins.map(function(basin) {
+  var geom      = basin.geometry();
+  var meanSlope = slope.reduceRegion({
+    reducer:ee.Reducer.mean(), geometry:geom,
+    scale:90, maxPixels:1e10, bestEffort:true
+  }).get('slope');
+
+  var area1990 = ee.Number(getJRCWaterMask(1990).reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:geom,
+    scale:30, maxPixels:1e10, bestEffort:true
+  }).get('water', 0)).multiply(0.0009);
+
+  var area2021 = ee.Number(getJRCWaterMask(2021).reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:geom,
+    scale:30, maxPixels:1e10, bestEffort:true
+  }).get('water', 0)).multiply(0.0009);
+
+  var pctChange = area1990.gt(0)
+    ? area2021.subtract(area1990).divide(area1990).multiply(100)
+    : ee.Number(0);
+
+  return basin.set({
+    'mean_slope': meanSlope,
+    'area_1990':  area1990,
+    'area_2021':  area2021,
+    'pct_change': pctChange
+  });
+});
+
+var basinsWithLakes = basinsWithStats
+  .filter(ee.Filter.gt('area_2021', 0))
+  .filter(ee.Filter.notNull(['mean_slope']));
+
+print('Basins with lakes:', basinsWithLakes.size());
+
+var scatterChart = ui.Chart.feature.byFeature({
+  features:    basinsWithLakes,
+  xProperty:   'mean_slope',
+  yProperties: ['pct_change']
+})
+.setChartType('ScatterChart')
+.setOptions({
+  title:     'Slope within 500m of lake vs lake area change (1990–2021)',
+  hAxis:     {title:'Mean slope (°)', minValue:0},
+  vAxis:     {title:'Lake area change (%)'},
+  pointSize: 5,
+  colors:    ['#1a73e8'],
+  trendlines:{0:{type:'linear',color:'#e74c3c',lineWidth:2,
+               opacity:0.8,showR2:true,visibleInLegend:true}},
+  legend:    {position:'bottom'}
+});
+print(scatterChart);
+
+var basinsClassified = basinsWithLakes.map(function(f) {
+  var s = ee.Number(f.get('mean_slope'));
+  var cat = ee.Algorithms.If(
+    s.gte(25), 'High (>25°)',
+    ee.Algorithms.If(s.gte(15), 'Medium (15–25°)', 'Low (<15°)')
+  );
+  return f.set('slope_category', cat);
+});
+
+var barChart = ui.Chart.feature.groups({
+  features:       basinsClassified,
+  xProperty:      'slope_category',
+  yProperty:      'pct_change',
+  seriesProperty: 'slope_category'
+})
+.setChartType('ColumnChart')
+.setOptions({
+  title:  'Lake growth by slope risk category (1990–2021)',
+  hAxis:  {title:'Slope risk category'},
+  vAxis:  {title:'Mean lake area change (%)'},
+  colors: ['#2ecc71','#e67e22','#e74c3c'],
+  legend: {position:'none'}
+});
+print(barChart);
+
+// ── 15. RESIDUAL ANALYSIS ─────────────────────────────────────────
+var SLOPE_COEF = -9.073;
+var INTERCEPT  = 290.952;
+
+var basinsWithResiduals = basinsWithLakes.map(function(f) {
+  var s         = ee.Number(f.get('mean_slope'));
+  var actual    = ee.Number(f.get('pct_change'));
+  var predicted = s.multiply(SLOPE_COEF).add(INTERCEPT);
+  var residual  = actual.subtract(predicted);
+  var residualType = ee.Algorithms.If(
+    residual.gt(0), 'above predicted', 'below predicted'
+  );
+  return f.set({
+    'predicted':     predicted,
+    'residual':      residual,
+    'abs_residual':  residual.abs(),
+    'residual_type': residualType
+  });
+});
+
+print('Top 5 basins with largest residuals:',
+  basinsWithResiduals.sort('abs_residual', false).limit(5));
+
+var residualChart = ui.Chart.feature.byFeature({
+  features:    basinsWithResiduals,
+  xProperty:   'mean_slope',
+  yProperties: ['residual']
+})
+.setChartType('ScatterChart')
+.setOptions({
+  title:     'Residuals vs mean slope (1990–2021)',
+  hAxis:     {title:'Mean slope (°)', minValue:0},
+  vAxis:     {title:'Residual (actual − predicted %)'},
+  pointSize: 5,
+  colors:    ['#1a73e8'],
+  baselineColor: 'red'
+});
+print(residualChart);
+
+var residualHist = ui.Chart.feature.histogram({
+  features:   basinsWithResiduals,
+  property:   'residual',
+  maxBuckets: 20
+})
+.setOptions({
+  title:  'Distribution of residuals',
+  hAxis:  {title:'Residual value (%)'},
+  vAxis:  {title:'Count'},
+  colors: ['#1a73e8']
+});
+print(residualHist);
+
+var abovePredicted = basinsWithResiduals
+  .filter(ee.Filter.eq('residual_type', 'above predicted'));
+var belowPredicted = basinsWithResiduals
+  .filter(ee.Filter.eq('residual_type', 'below predicted'));
+
+abovePredicted.size().evaluate(function(n) {
+  print('Basins growing FASTER than predicted:', n);
+});
+belowPredicted.size().evaluate(function(n) {
+  print('Basins growing SLOWER than predicted:', n);
+});
+basinsWithResiduals.aggregate_mean('residual').evaluate(function(m) {
+  print('Mean residual (should be ~0):', m.toFixed(2));
+});
+basinsWithResiduals.aggregate_total_sd('residual').evaluate(function(sd) {
+  print('Std deviation of residuals:', sd.toFixed(2));
+});
+
+// ── 16. TOP 16 FAST-GROWING BASINS ───────────────────────────────
+var fastGrowing = basinsWithResiduals.sort('residual', false).limit(16);
+
+Map.addLayer(
+  ee.Image().byte().paint({featureCollection:fastGrowing, color:1, width:2}),
+  {palette:['FF0000']}, 'Top 16 fast-growing basins (red)');
+Map.addLayer(
+  ee.Image().byte().paint({featureCollection:belowPredicted, color:1, width:1}),
+  {palette:['0000FF']}, 'Below predicted basins (blue)', false);
+
+print('Top 16 fast-growing basins:', fastGrowing);
+
+// ── 17. ASPECT CLASSIFICATION ─────────────────────────────────────
+var aspect = ee.Terrain.aspect(ee.Image('USGS/SRTMGL1_003'));
+
+var basinsWithAspect = basinsWithResiduals.map(function(f) {
+  var geom = f.geometry();
+  var aspectDeg = ee.Number(aspect.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   geom,
+    scale:      90,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('aspect', 0));
+
+  var cardinal = ee.Algorithms.If(
+    aspectDeg.lt(45).or(aspectDeg.gte(315)), 'North',
+    ee.Algorithms.If(aspectDeg.lt(135), 'East',
+    ee.Algorithms.If(aspectDeg.lt(225), 'South', 'West'))
+  );
+  var facing = ee.Algorithms.If(
+    aspectDeg.lt(90).or(aspectDeg.gte(270)), 'North-facing', 'South-facing'
+  );
+
+  var centroid  = geom.centroid(1).coordinates();
+  var longitude = ee.Number(centroid.get(0));
+  var latitude  = ee.Number(centroid.get(1));
+
+  var eastWest   = ee.Algorithms.If(longitude.lt(-77.45), 'Western slope', 'Eastern slope');
+  var northSouth = ee.Algorithms.If(latitude.gt(-9.5), 'Northern sector', 'Southern sector');
+
+  return f.set({
+    'aspect_deg':  aspectDeg,
+    'cardinal':    cardinal,
+    'facing':      facing,
+    'longitude':   longitude,
+    'latitude':    latitude,
+    'east_west':   eastWest,
+    'north_south': northSouth
+  });
+});
+
+print('Basins with aspect:', basinsWithAspect.limit(5));
+
+// ── ASPECT CHARTS — correct syntax ───────────────────────────────
+var aspectChart = ui.Chart.feature.groups({
+  features:       basinsWithAspect,
+  xProperty:      'cardinal',
+  yProperty:      'residual',
+  seriesProperty: 'cardinal'
+}).setChartType('ColumnChart').setOptions({
+  title:  'Mean residual by aspect direction',
+  hAxis:  {title:'Aspect'},
+  vAxis:  {title:'Mean residual (%)'},
+  colors: ['#3498db','#e67e22','#e74c3c','#2ecc71'],
+  legend: {position:'none'}
+});
+print(aspectChart);
+
+var eastWestChart = ui.Chart.feature.groups({
+  features:       basinsWithAspect,
+  xProperty:      'east_west',
+  yProperty:      'residual',
+  seriesProperty: 'east_west'
+}).setChartType('ColumnChart').setOptions({
+  title:  'Mean residual by easting',
+  hAxis:  {title:'Position'},
+  vAxis:  {title:'Mean residual (%)'},
+  colors: ['#9b59b6','#1abc9c'],
+  legend: {position:'none'}
+});
+print(eastWestChart);
+
+var northSouthChart = ui.Chart.feature.groups({
+  features:       basinsWithAspect,
+  xProperty:      'north_south',
+  yProperty:      'residual',
+  seriesProperty: 'north_south'
+}).setChartType('ColumnChart').setOptions({
+  title:  'Mean residual by northing',
+  hAxis:  {title:'Position'},
+  vAxis:  {title:'Mean residual (%)'},
+  colors: ['#e74c3c','#3498db'],
+  legend: {position:'none'}
+});
+print(northSouthChart);
+
+var fastWithAspect = basinsWithAspect.sort('residual', false).limit(16);
+fastWithAspect.aggregate_histogram('cardinal').evaluate(function(h) {
+  print('Top 16 by cardinal direction:', h);
+});
+fastWithAspect.aggregate_histogram('east_west').evaluate(function(h) {
+  print('Top 16 by easting:', h);
+});
+fastWithAspect.aggregate_histogram('north_south').evaluate(function(h) {
+  print('Top 16 by northing:', h);
+});
+
+// ── 18. EXPORTS ──────────────────────────────────────────────────
+Export.table.toDrive({
+  collection:  annualStats,
+  description: 'CB_annual_lake_area_timeseries',
+  folder:      'CordilleraBlanca',
+  fileFormat:  'CSV'
+});
+Export.table.toDrive({
+  collection:  lakeGrowthStats,
+  description: 'CB_lake_growth_with_slope_sla',
+  folder:      'CordilleraBlanca',
+  fileFormat:  'CSV',
+  selectors:   ['area_1990_km2','area_2021_km2','pct_change',
+                'annual_rate_pct','growing','slope_500m_deg',
+                'slope_max_deg','pct_steep_terrain',
+                'sla_deg','sla_unstable',
+                'slope_risk','hazard_score']
+});
+Export.image.toAsset({
+  image:       lakeGrowthRaster,
+  description: 'CB_lake_growth_pct_raster',
+  assetId:     'projects/your-project/assets/emily_lake_growth',
+  region:      studyArea, scale:30, maxPixels:1e10
+});
+Export.image.toAsset({
+  image:       hazardRaster,
+  description: 'CB_hazard_score_raster',
+  assetId:     'projects/your-project/assets/emily_hazard_score',
+  region:      studyArea, scale:30, maxPixels:1e10
+});
