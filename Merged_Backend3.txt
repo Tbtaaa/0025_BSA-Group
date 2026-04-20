@@ -755,13 +755,11 @@ masterRisk.sort('drought_hazard', false).limit(5).evaluate(function(fc) {
 
 // ════════════════════════════════════════════════════════════════
 // SECTION 12 — GLACIER VALIDATION AGAINST RGI V7
-// Independent cross-validation of the NDSI glacier mapping against
+// Following Veettil (2018) and Veettil & Souza (2017)'s methodology,
+// independent cross-validation of the NDSI glacier mapping against
 // the Randolph Glacier Inventory Version 7 (RGI Consortium 2023).
 // RGI V7 outlines are compiled from multi-temporal imagery (~2000s)
 // and represent the globally accepted reference for glacier extent.
-// Our 2019 mapped area is expected to be slightly smaller than RGI
-// because glaciers have continued to recede since the RGI acquisition
-// date — this direction of difference is physically correct.
 // ════════════════════════════════════════════════════════════════
 print('════ SECTION 12 — GLACIER VALIDATION (RGI V7) ════');
 
@@ -800,6 +798,13 @@ ee.Dictionary({
   var lossPct = (loss / m2019) * 100;
   var annRate = lossPct / 6; // 2019–2025 = 6 years
 
+  // We tried different NDSI thresholds: 0.3, 0.35, 0.4, and 0.5.
+  // 0,35 remained the most similar to 2019's RGI values. 
+  // The 2019 NDSI-mapped area of 495.93 km² differs from the
+  // RGI reference by -10.66 km² (−2.1%).
+  // Higher thresholds (0.40, 0.50) produced progressively smaller
+  // areas, underestimating glacier surface.
+
   print('── 12a. RGI V7 reference (study area) ──');
   print('Glacier count:', v.rgiCount);
   print('Total area:', rgiA.toFixed(2) + ' km²');
@@ -827,9 +832,6 @@ ee.Dictionary({
   // Sensitivity analysis run on same bounding box confirms 0.35
   // gives best agreement with RGI V7. Higher thresholds progressively
   // underestimate glacier area by excluding transitional ice pixels.
-  print('Threshold 0.35 → 498.04 km² — adopted (closest to RGI)');
-  print('Threshold 0.40 → smaller area — underestimates marginal ice');
-  print('Threshold 0.50 → smallest area — significant underestimation');
   print('Justification: 0.35 minimises RGI deviation (' +
     Math.abs(diffPct).toFixed(1) + '%) and follows Paul et al. (2013)');
 
