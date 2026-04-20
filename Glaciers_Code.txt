@@ -1,1 +1,152 @@
-// ════════════════════════════════════════════════════════════════// Glacier Recession (2019–2025)//// Goal: detect how much glacier ice has been lost between 2019// and 2025 using Sentinel-2 satellite imagery.// We use the NDSI (Normalised Difference Snow Index) to identify// snow and ice pixels, then compare the two years to find// where glacier has disappeared.// ════════════════════════════════════════════════════════════════// ── Step 1: Cloud masking function ───────────────────────────────// Sentinel-2 images often contain clouds which look bright and// could be mistaken for snow or ice. Before doing any analysis// we must remove cloud pixels.// Sentinel-2 includes a Scene Classification Layer (SCL band)// which labels every pixel by what it is. We keep only the// pixel types that are safe to use://   4  = vegetation (safe)//   5  = bare soil / rock (safe)//   6  = water (safe)//   7  = unclassified (safe to include)//   11 = snow and ice ← the most important one for us// Everything else (clouds, cloud shadows, saturated pixels)// is masked out and treated as missing datafunction maskS2clouds(image) {  var scl = image.select('SCL'); // Select the classification band  return image.updateMask(    scl.eq(4).or(scl.eq(5)).or(scl.eq(6))      .or(scl.eq(7)).or(scl.eq(11))    // updateMask hides any pixel NOT in this list  );}// ── Step 2: Load and filter the Sentinel-2 image collection ──────// Sentinel-2 is a European Space Agency satellite that images// the Earth every 5 days at 10–20m resolution.// We use the Surface Reflectance version (SR_HARMONIZED) which// has already been corrected for atmospheric effects like haze.// We apply three filters before doing any analysis:var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')  .filterBounds(STUDY_AREA)                        // Only images that                                                  // cover our study area  .filter(ee.Filter.calendarRange(6, 9, 'month')) // Only June–September                                                  // (dry season = less cloud,                                                  // no seasonal snow confusion)  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) // Reject any image                                                        // that is more than                                                        // 20% cloud covered  .map(maskS2clouds);                             // Apply the pixel-level                                                  // cloud mask to every image// ── Step 3: Function to detect glacier extent for any year ────────// For a given year this function:// 1. Filters the collection to just that year// 2. Takes the median of all images (best cloud-free composite)// 3. Computes NDSI to identify snow and ice// 4. Applies a water filter to avoid confusing lakes with glaciers// 5. Returns a binary image: 1 = glacier, 0 = not glacierfunction getGlacierMask(year) {  // Combine all dry-season images from this year into one  // clean composite by taking the median value of each pixel.  // Median is used rather than mean because it is more robust  // to outliers — a single cloudy image won't skew the result.  var composite = sentinel2    .filter(ee.Filter.calendarRange(year, year, 'year'))    .median()       // One clean image from multiple observations    .clip(STUDY_AREA);  // ── NDSI calculation ────────────────────────────────────────  // NDSI = (Green - SWIR) / (Green + SWIR)  // Snow and ice reflect green light strongly but absorb  // shortwave infrared (SWIR). This makes their NDSI value  // strongly positive (close to +1).  // Vegetation, rock, and soil have low or negative NDSI.  // For Sentinel-2: Green = Band 3, SWIR = Band 11  // normalizedDifference handles the formula automatically  // and avoids division by zero errors.  // Threshold 0.35: pixels with NDSI ≥ 0.35 are classified  // as glacier/snow. This is the standard glaciology threshold.  return composite.normalizedDifference(['B3', 'B11'])    .gte(0.35)                        // Apply the 0.35 threshold    // ── Water filter ───────────────────────────────────────    // Problem: lakes and rivers also have high NDSI because    // water also absorbs SWIR. Without this filter we would    // incorrectly classify lakes as glaciers.    // Solution: ice reflects NIR (Band 8) strongly, but water    // absorbs NIR almost completely. So we require NIR > 1000    // (in raw Sentinel-2 units, where 10000 = 100% reflectance,    // so 1000 = 10% reflectance minimum).    // This removes water bodies while keeping snow and ice.    .and(composite.select('B8').gt(1000))    .rename('glacier')  // Name the output band 'glacier'    .toFloat();         // Convert to floating point for export}// ── Step 4: Create glacier maps for 2019 and 2025 ────────────────var glacierMask2019 = getGlacierMask(2019); // Glacier extent in 2019var glacierMask2025 = getGlacierMask(2025); // Glacier extent in 2025// ── Step 5: Calculate glacier loss ───────────────────────────────// Subtract 2025 from 2019://   2019 pixel = 1, 2025 pixel = 1 → result = 0  (still glacier)//   2019 pixel = 1, 2025 pixel = 0 → result = 1  (glacier LOST)//   2019 pixel = 0, 2025 pixel = 0 → result = 0  (never glacier)//   2019 pixel = 0, 2025 pixel = 1 → result = -1 (new glacier?)// .gt(0) keeps only the positive values — pixels that were glacier// in 2019 but are no longer glacier in 2025. These are the areas// of confirmed glacier recession over the 6-year period.var glacierLoss = glacierMask2019.subtract(glacierMask2025)  .gt(0)  .rename('glacier_loss')  .toFloat();// ── Add layers to map for visual inspection ───────────────────────// All hidden by default — turn on in the Layers panel to verify// the glacier detection looks correct before exportingMap.addLayer(glacierMask2019.selfMask(),  {palette:['ffffff'], opacity:0.5}, // White = glacier in 2019  'Glacier 2019 (white)', false);Map.addLayer(glacierMask2025.selfMask(),  {palette:['00e5ff'], opacity:0.8}, // Cyan = glacier in 2025  'Glacier 2025 (cyan)', false);Map.addLayer(glacierLoss.selfMask(),  {palette:['FF4444'], opacity:0.8}, // Red = lost between 2019–2025  'Glacier loss (red)', false);
+// ════════════════════════════════════════════════════════════════
+// Glacier Recession (2019–2025)
+//
+// Goal: detect how much glacier ice has been lost between 2019
+// and 2025 using Sentinel-2 satellite imagery.
+// We use the NDSI (Normalised Difference Snow Index) to identify
+// snow and ice pixels, then compare the two years to find
+// where glacier has disappeared.
+// ════════════════════════════════════════════════════════════════
+
+// ── Step 1: Cloud masking function ───────────────────────────────
+// We will be working with glaciers. So, we have to bare in 
+// mind that satellite images often contain clouds which could
+// be mistaken with snow or ice. Before doing any analysis
+// we must remove cloud pixels.
+// Sentinel-2, the images we are going to use for glacier identification
+// includes a Scene Classification Layer (SCL band)
+// which labels every pixel by what it is. We keep only the
+// pixel types that are safe to use. Those are:
+//   4  = vegetation (safe)
+//   5  = bare soil / rock (safe)
+//   6  = water (safe)
+//   7  = unclassified (safe to include)
+//   11 = snow and ice
+// Everything else (clouds, cloud shadows, saturated pixels)
+// is masked out and treated as missing data
+function maskS2clouds(image) {
+  var scl = image.select('SCL'); // Select the classification band
+  return image.updateMask(
+    scl.eq(4).or(scl.eq(5)).or(scl.eq(6))
+      .or(scl.eq(7)).or(scl.eq(11))
+  );
+}
+
+// ── Step 2: Load and filter the Sentinel-2 image collection ──────
+// Sentinel-2 is a European Space Agency satellite that images
+// the Earth every 5 days at 10–20m resolution. We will be using 
+// this images instead of Landsat 8 OLI due to its higher spatial resolution
+// (10mts < 30mts) and its shorter revisit time (5 days vs 8 days).
+// In spite of the fact that Sentinel's serie is shorter to Landsat
+// (10 years), our main focus will be analyzing the present situation and 
+// not the historical melting process. In this sense, we will prioritize
+// precition (better resolution) over time span. Past studies have shown
+// Sentinel's lower sensitivity to cast shadows and steep terrain in 
+// the Cordillera Blanca (Veettil, 2018). 
+
+// Adapting Veettil (2018) and Veettil & Souza (2017)'s methodology,
+// We use the Surface Reflectance version (SR_HARMONIZED) which
+// has already been corrected for atmospheric effects like haze.
+// We apply three filters before doing any analysis:
+var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(STUDY_AREA)                        // Only images that
+                                                  // cover our study area
+  .filter(ee.Filter.calendarRange(6, 9, 'month')) // Only images taken 
+                                                  // during the austral dry season
+                                                  // (June–September), when seasonal
+                                                  // snow cover at glacier termini is
+                                                  // minimal (Veettil and Souza, 2017).
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) // Reject any image
+                                                        // that is more than
+                                                        // 20% cloud covered
+  .map(maskS2clouds);                             // Apply the pixel-level
+                                                  // cloud mask to every image
+
+// ── Step 3: Function to detect glacier extent for any year ────────
+// For a given year this function:
+// 1. Filters the collection to just that year
+// 2. Takes the median of all images (best cloud-free composite)
+// 3. Computes NDSI to identify snow and ice
+// 4. Applies a water filter to avoid confusing lakes with glaciers
+// 5. Returns a binary image: 1 = glacier, 0 = not glacier
+function getGlacierMask(year) {
+
+  // Combine all dry-season images from this year into one
+  // clean composite by taking the median value of each pixel.
+  // Median is used rather than mean because it is more robust
+  // to outliers — a single cloudy image won't skew the result.
+  var composite = sentinel2
+    .filter(ee.Filter.calendarRange(year, year, 'year'))
+    .median()       // One clean image from multiple observations
+    .clip(STUDY_AREA);
+
+  // ── NDSI calculation ────────────────────────────────────────
+  // Following Veettil (2018), glacier extent was mapped
+  // using the Normalized Difference Snow Index (NDSI) computed
+  // from Sentinel-2 Bands 3 (Green) and 11 (Short-Wave Infrared - SWIR).
+  // The NDSI formula is NDSI = [Green − SWIR] / [Green + SWIR]).
+  // Snow and ice reflect green light strongly but absorb
+  // shortwave infrared (SWIR). This makes their NDSI value
+  // strongly positive (close to +1).
+  // Vegetation, rock, and soil have low or negative NDSI.
+  // normalizedDifference handles the formula automatically
+  // and avoids division by zero errors.
+  // Pixels with NDSI ≥ 0.35 are classified
+  // as glacier/snow. Regarding the NDSI classification threshold,
+  // Härer et al. (2017) suggest that the optimal value for reducing 
+  // uncertainty in snow-cover maps depends on the specific area. 
+  // By testing different thresholds (0.3-0.5) within the glaciology band
+  // standart, we found that an NDSI of 0.35 was the most accurate at
+  // classifying glaciers.
+  return composite.normalizedDifference(['B3', 'B11'])
+    .gte(0.35)                        // Apply the 0.35 threshold
+
+    // ── Water filter ───────────────────────────────────────
+    // Lakes and rivers also have high NDSI because
+    // water also absorbs SWIR. Without this filter we would
+    // incorrectly classify lakes as glaciers.
+    // However, ice reflects NIR (Band 8) strongly, but water
+    // absorbs NIR almost completely. So we require NIR > 1000
+    // (in raw Sentinel-2 units, where 10000 = 100% reflectance,
+    // so 1000 = 10% reflectance minimum).
+    // This removes water bodies while keeping snow and ice.
+    .and(composite.select('B8').gt(1000))
+
+    .rename('glacier')  // Name the output band 'glacier'
+    .toFloat();         // Convert to floating point for export
+}
+
+// ── Step 4: Create glacier maps for 2019 and 2025 ────────────────
+// Even though the Sentinel-2 MSI’s series started in 2015, Imagery
+// between that date and 2018 was excluded due to the low quantity
+// of non-cloudy images available.
+var glacierMask2019 = getGlacierMask(2019); // Glacier extent in 2019
+var glacierMask2025 = getGlacierMask(2025); // Glacier extent in 2025
+
+// ── Step 5: Calculate glacier loss ───────────────────────────────
+// Subtract 2025 from 2019. Value results_
+//   if 2019 pixel = 1 and 2025 pixel = 1, so result = 0  (still glacier)
+//   if 2019 pixel = 1 and 2025 pixel = 0, so result = 1  (glacier LOST)
+//   if 2019 pixel = 0 and 2025 pixel = 0, so result = 0  (never glacier)
+//   if 2019 pixel = 0 and 2025 pixel = 1, so result = -1 (new glacier?)
+// .gt(0) keeps only the positive values — pixels that were glacier
+// in 2019 but are no longer glacier in 2025. These are the areas
+// of confirmed glacier recession over the 6-year period.
+var glacierLoss = glacierMask2019.subtract(glacierMask2025)
+  .gt(0)
+  .rename('glacier_loss')
+  .toFloat();
+
+// ── Add layers to map for visual inspection ───────────────────────
+
+Map.addLayer(glacierMask2019.selfMask(),
+  {palette:['ffffff'], opacity:0.5}, // White = glacier in 2019
+  'Glacier 2019 (white)', false);
+
+Map.addLayer(glacierMask2025.selfMask(),
+  {palette:['00e5ff'], opacity:0.8}, // Cyan = glacier in 2025
+  'Glacier 2025 (cyan)', false);
+
+Map.addLayer(glacierLoss.selfMask(),
+  {palette:['FF4444'], opacity:0.8}, // Red = lost between 2019–2025
+  'Glacier loss (red)', false);
