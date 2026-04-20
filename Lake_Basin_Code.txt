@@ -1,0 +1,256 @@
+// ════════════════════════════════════════════════════════════════
+// Lake Basin Change Detection (2010–2021)
+// 
+// Goal: detect how much glacial lakes have grown over 11 years
+// using satellite water detection data from the JRC dataset.
+// We compare lake area in 2010 vs 2021 and calculate how much
+// each lake has grown, how steep the surrounding terrain is,
+// and how stable the moraine dam in front of each lake is.
+// ════════════════════════════════════════════════════════════════
+
+// ── Time range we are analysing ──────────────────────────────────
+var START_YEAR  = 2010;  // First year of analysis
+var END_YEAR    = 2021;  // Last year of analysis
+var MIN_AREA_M2 = 5000;  // Ignore any water body smaller than 5000m²
+                          // (removes noise pixels that aren't real lakes)
+
+// ── Load the JRC water dataset ────────────────────────────────────
+// JRC Global Surface Water (Pekel et al. 2016) records every month
+// whether each 30m pixel on Earth was water, land, or unobserved.
+// It goes back to 1984 using Landsat satellite imagery.
+var jrcMonthly = ee.ImageCollection('JRC/GSW1_4/MonthlyHistory');
+
+// ── Function: create a lake map for any given year ────────────────
+// This function takes a year number and returns a binary image:
+// 1 = water pixel, 0 = not water
+// We only look at June–September (dry season) because:
+// - Cloud cover is lowest in the dry season
+// - Snow melt is minimal so water pixels are clearly lakes not snow
+// - Lake area is most stable so we get a consistent measurement
+function getJRCWaterMask(year) {
+  var start = ee.Date.fromYMD(year, 6, 1);  // 1st June
+  var end   = ee.Date.fromYMD(year, 9, 30); // 30th September
+
+  return jrcMonthly
+    .filterDate(start, end)        // Keep only June–September images
+    .map(function(img) {
+      return img.eq(2);            // Value 2 = permanent water in JRC
+                                   // (value 1 = seasonal, 0 = land)
+    })
+    .max()                         // Take the maximum across all months
+                                   // so if water appears in ANY month
+                                   // that pixel counts as water
+    .clip(STUDY_AREA)               // Cut to our study rectangle
+    .eq(1)                         // Convert to binary: 1=water, 0=other
+    .and(elevMask)                 // Apply elevation filter: only keep
+                                   // pixels between 3800m and 6800m
+                                   // (glacial lake elevation range)
+    .rename('water');              // Name the band 'water' for clarity
+}
+
+// ── Create lake maps for 2010 and 2021 ───────────────────────────
+var lakeMask2010 = getJRCWaterMask(2010);
+var lakeMask2021 = getJRCWaterMask(2021);
+
+// ── Print total lake area to the console ─────────────────────────
+// This is a quick sanity check — we count all water pixels and
+// multiply by pixel area (30m × 30m = 900m² = 0.0009 km²)
+print('2010 lake area km²:', ee.Number(
+  lakeMask2010.reduceRegion({
+    reducer:   ee.Reducer.sum(),  // Add up all the 1s (water pixels)
+    geometry:  STUDY_AREA,
+    scale:     30,                // 30m pixel size matches JRC resolution
+    maxPixels: 1e10,              // Allow large computations
+    bestEffort:true               // If too large, scale up automatically
+  }).get('water', 0)             // Get the sum, default 0 if missing
+).multiply(0.0009));             // Convert pixel count → km²
+
+print('2021 lake area km²:', ee.Number(
+  lakeMask2021.reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  STUDY_AREA,
+    scale:     30,
+    maxPixels: 1e10,
+    bestEffort:true
+  }).get('water', 0)
+).multiply(0.0009));
+
+// ── Function: convert water pixels into lake polygons ─────────────
+// Instead of working with individual pixels, we group connected
+// water pixels together into polygon shapes — one polygon per lake.
+// This lets us calculate the area, location, and shape of each lake.
+function getJRCLakes(year) {
+  return getJRCWaterMask(year)
+    .selfMask()                    // Hide the 0 (non-water) pixels
+                                   // so only water pixels are processed
+    .reduceToVectors({
+      geometry:     STUDY_AREA,
+      scale:        30,
+      geometryType: 'polygon',     // Output as polygon shapes
+      eightConnected: false,       // Only connect pixels sharing an edge
+                                   // (not diagonal) — reduces noise
+      labelProperty: 'water',
+      bestEffort:   true,
+      maxPixels:    1e10
+    })
+    .map(function(f) {
+      // For each lake polygon, calculate and store its area
+      var area = f.geometry().area(1); // Area in m² (1m tolerance)
+      return f.set({
+        'area_m2':  area,
+        'area_km2': ee.Number(area).divide(1e6), // Convert to km²
+        'year':     year                          // Remember which year
+      });
+    })
+    // Remove anything smaller than 5000m² — these are noise pixels
+    // not real glacial lakes
+    .filter(ee.Filter.gte('area_m2', MIN_AREA_M2));
+}
+
+// ── Get lake polygons for both years ─────────────────────────────
+var earlyLakes = getJRCLakes(START_YEAR); // 2010 lakes
+var lateLakes  = getJRCLakes(END_YEAR);   // 2021 lakes
+
+// ── Match each 2021 lake to its 2010 version ──────────────────────
+// We need to know which lake in 2021 corresponds to which lake in 2010
+// so we can calculate how much each individual lake grew.
+// The Join works by checking if a 2021 lake polygon overlaps spatially
+// with a 2010 lake polygon — if they intersect, they are the same lake.
+// saveFirst means: for each 2021 lake, save the best matching 2010 lake
+// as a property called 'early_match'
+var joined = ee.Join.saveFirst('early_match').apply({
+  primary:   lateLakes,   // 2021 lakes (main table)
+  secondary: earlyLakes,  // 2010 lakes (lookup table)
+  condition: ee.Filter.intersects({
+    leftField:  '.geo',   // Use the polygon geometry for matching
+    rightField: '.geo',
+    maxError:   10        // Allow 10m tolerance for alignment errors
+  })
+});
+// Note: lakes that existed in 2021 but NOT in 2010 are dropped here
+// because they have no match. Only lakes present in both years are kept.
+
+// ── Calculate growth + slope + SLA + hazard score per lake ────────
+// For every matched lake pair, we compute four things:
+// 1. How much the lake grew (%)
+// 2. Mean slope within 500m (avalanche trigger risk)
+// 3. SLA — mean slope within 1000m (moraine stability)
+// 4. A combined hazard score (0–1)
+var lakeGrowthStats = joined.map(function(f) {
+
+  var lakeGeom  = f.geometry(); // The 2021 lake polygon shape
+
+  // Get the area of this lake in 2010 from the matched early feature
+  var earlyArea = ee.Number(ee.Feature(f.get('early_match')).get('area_km2'));
+  // Get the area of this lake in 2021
+  var lateArea  = ee.Number(f.get('area_km2'));
+
+  // Calculate percentage growth:
+  // (2021 area - 2010 area) / 2010 area × 100
+  var pctChange = lateArea.subtract(earlyArea)
+    .divide(earlyArea).multiply(100);
+
+  // ── Slope metric 1: mean slope within 500m of the lake ───────
+  // A steep 500m buffer means mass movements (avalanches, rockfalls)
+  // are more likely to enter the lake and trigger a GLOF
+  // Threshold from Rounce et al. (2017): >25° = high risk
+  var slope500m = ee.Number(slope.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   lakeGeom.buffer(500), // Expand lake outward by 500m
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0)); // Default 0 if no result
+
+  // ── Slope metric 2: SLA within 1000m (moraine stability) ─────
+  // The Steep Lakefront Area measures how steeply the terrain drops
+  // in front of the moraine dam.
+  // Fujita et al. (2013): SLA > 10° = moraine potentially unstable
+  var slaValue = ee.Number(slope.reduceRegion({
+    reducer:    ee.Reducer.mean(),
+    geometry:   lakeGeom.buffer(1000), // Wider 1000m buffer
+    scale:      30,
+    maxPixels:  1e10,
+    bestEffort: true
+  }).get('slope', 0));
+
+  // ── Hazard score: combine lake size + slope + SLA ─────────────
+  // Each component is normalised to 0–1 so they can be combined fairly
+  // Weights follow Rounce et al. (2017):
+  //   Lake size: 40% — bigger lakes release more water in a GLOF
+  //   Slope:     35% — steeper terrain = higher avalanche risk
+  //   SLA:       25% — unstable moraine = higher self-destruction risk
+
+  var lakeScore  = lateArea.divide(2.0).min(1.0);
+  // A lake ≥ 2 km² scores maximum (1.0), smaller lakes score less
+
+  var slopeScore = slope500m.divide(30.0).min(1.0);
+  // A slope ≥ 30° scores maximum (1.0)
+
+  var slaScore   = slaValue.subtract(10).divide(20).max(0).min(1.0);
+  // Below 10° scores 0 (stable), 30°+ scores 1.0 (very unstable)
+  // The subtract(10) means the first 10° don't count at all
+
+  var hazardScore = lakeScore.multiply(0.4)   // 40% weight
+    .add(slopeScore.multiply(0.35))            // 35% weight
+    .add(slaScore.multiply(0.25));             // 25% weight
+
+  // ── Store all computed values on the feature ──────────────────
+  return f.set({
+    'area_2010_km2':  earlyArea,   // Lake area in 2010
+    'area_2021_km2':  lateArea,    // Lake area in 2021
+    'pct_change':     pctChange,   // Growth % over 11 years
+    'slope_500m_deg': slope500m,   // Mean slope in 500m buffer (degrees)
+    'sla_deg':        slaValue,    // SLA — mean slope in 1000m buffer
+    'sla_unstable':   slaValue.gte(10), // true if SLA ≥ 10° (unstable)
+    'hazard_score':   hazardScore, // Combined score 0–1
+    'early_match':    null         // Clear the nested feature to avoid
+                                   // export errors (see fix below)
+  });
+});
+
+// ── FIX: Remove the nested early_match property ───────────────────
+// The Join stored the 2010 lake as a nested Feature inside each row.
+// GEE cannot export a Feature-inside-a-Feature to an asset table.
+// So we create a clean copy that only keeps the computed properties.
+var lakeGrowthStatsClean = lakeGrowthStats.map(function(f) {
+  return ee.Feature(f.geometry(), {
+    'area_2010_km2':  f.get('area_2010_km2'),
+    'area_2021_km2':  f.get('area_2021_km2'),
+    'pct_change':     f.get('pct_change'),
+    'slope_500m_deg': f.get('slope_500m_deg'),
+    'sla_deg':        f.get('sla_deg'),
+    'sla_unstable':   f.get('sla_unstable'),
+    'hazard_score':   f.get('hazard_score')
+    // early_match is intentionally omitted here
+  });
+});
+
+// Quick check — print the first 3 lakes to the console
+print('Lake growth stats sample:', lakeGrowthStatsClean.limit(3));
+
+// ── Convert lake polygons into raster images for export ───────────
+// The app needs images (rasters) not tables for fast map display.
+// reduceToImage paints each lake polygon onto a pixel grid
+// using the value of the chosen property.
+
+// Lake growth raster — only growing lakes, showing % change
+// Yellow = small growth, red = large growth
+var lakeGrowthRaster = lakeGrowthStatsClean
+  .filter(ee.Filter.gt('pct_change', 0)) // Only keep growing lakes
+  .reduceToImage({
+    properties: ['pct_change'],    // Paint each pixel with growth %
+    reducer:    ee.Reducer.mean()  // If polygons overlap, take the mean
+  })
+  .rename('lake_growth_pct')       // Name the output band
+  .clip(STUDY_AREA);                // Trim to study area
+
+// Hazard score raster — all lakes, showing combined risk score
+// Yellow = low hazard, red = high hazard
+var hazardRaster = lakeGrowthStatsClean
+  .reduceToImage({
+    properties: ['hazard_score'],
+    reducer:    ee.Reducer.mean()
+  })
+  .rename('hazard_score')
+  .clip(STUDY_AREA);
