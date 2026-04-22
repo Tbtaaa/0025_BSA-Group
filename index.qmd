@@ -682,8 +682,6 @@ var masterRisk   = ee.FeatureCollection(PROJECT + 'master_basin_risk');
 
 **Analysis per basin.** Clicking any basin opens a full statistics panel showing lake growth, glacier recession, land cover exposure, and population data. Four data layers can be toggled independently — Lake Growth (2010–2021), Glacier Recession (2019–2025), Land Cover Exposure (2024), and Settlements and Population (2024). All of them have been pre-processed during the Data Preparation and Precomputation stage.
 
-**Methodology panel.** A methodology panel explains how the impact score is calculated, ensuring full scrutiny and transparency.
-
 ```js
 function renderSelectedBasinUI(s) {
   if (!s) return;
@@ -774,6 +772,8 @@ function renderSelectedBasinUI(s) {
 ```
 
 ![Cordillera Blanca Risk App - static image of basin selection](images/App static image.png)
+
+**Methodology panel.** A methodology panel explains how the impact score is calculated, ensuring full scrutiny and transparency.
 
 ### Insights and objectives
 
