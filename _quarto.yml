@@ -1,22 +1,21 @@
 project:
   type: website
   output-dir: docs
+  resources:
+    - images/
 
 book:
   title: "CASA0025 Final Assessment"
-  author: "Group Name"
-  date: "01/01/2024"
+  author: "SQLitos: Emily Deeb, Santiago Soubie, Nadia Cabrera Salazar, Tabata Paredes Condor and Chad Barrett"
+  date: "2026-04-24"
   chapters:
     - index.qmd
-
   repo-actions: [edit]
   downloads: [pdf, epub]
   sharing: [twitter, facebook]
   favicon: favicon.ico
   sidebar:
     logo: casa_logo.png
-
-
 
 format:
   html:
@@ -27,3 +26,5 @@ format:
     code-overflow: wrap
     highlight-style: monokai.theme
     linkcolor: "#34a832"
+
+
