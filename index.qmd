@@ -3,6 +3,22 @@ title: "Cordillera Blanca Risk App (CBRA)"
 author: "SQLitos: Emily Deeb, Santiago Soubie, Nadia Cabrera Salazar, Tabata Paredes Condor and Chad Barrett"
 date: "2026-04-24"
 ---
+<style>
+table {
+  border: 1px solid #dee2e6 !important;
+  border-collapse: collapse !important;
+}
+table th,
+table td {
+  border: 1px solid #dee2e6 !important;
+  padding: 0.5rem 0.75rem !important;
+}
+table thead th {
+  background-color: #f8f9fa !important;
+  border-bottom: 2px solid #dee2e6 !important;
+  font-weight: 600 !important;
+}
+</style>
 
 # Cordillera Blanca Risk App (CBRA) {.unnumbered}
 
@@ -831,7 +847,7 @@ A special thanks to the Inter-American Development Bank (IDB), namely Haris Sana
 - Cárdenas, S.M., Ruiz, D.P. and Duarte, B.A. (2024) 'North Andean glacier retreat: a comprehensive analysis using satellite Earth observation data', in IGARSS 2024 – 2024 IEEE International Geoscience and Remote Sensing Symposium. IEEE, pp. 53–57.
 - Härer, S., Bernhardt, M., Siebers, M. and Schulz, K. (2017) 'On the need for a time- and location-dependent estimation of the NDSI threshold value for reducing existing uncertainties in snow cover maps at different scales', The Cryosphere, 12, pp. 1629–1642.
 - Emmer, A. (2018) 'GLOFs in the WOS: bibliometrics, geographies and global trends of research on glacial lake outburst floods (Web of Science, 1979–2016)', Natural Hazards and Earth System Sciences, 18, pp. 813–827.
-- Emmer, A., Allen, S.K., Carey, M., Frey, H., Huggel, C., Korup, O., Mergili, M., Sattar, A., Veh, G., Chen, T.Y., Cook, S.J., Correas-Gonzalez, M., Das, S., Diaz Moreno, A., Drenkhan， F., Fischer， M。， Immerzeel， W.W。， Izagirre， E。， Joshi， R.C。， Kougkoulos， I。， Kuyakanon Knapp， R。， Li， D。， Majeed， U。， Matti， S。， Moulton， H。， Nick， F。， Piroton， V。， Rashid， I。， Reza， M。， Ribeiro de Figueiredo， A。， Riveros， C。， Shrestha， F。， Shrestha， M。， Steiner， J。， Walker-Crawford， N。， Wood， J.L。 and Yde， J.C。 (2022) 'Progress and challenges in glacial lake outburst flood research (2017–2021): a research community perspective', Natural Hazards and Earth System Sciences，  twenty-two ， pp 。 3041–3061 。 https://doi.org/10.5194/nhess- twenty-two -3041- twenty-two .
-- Taylor， C。， Robinson， T。， Dunning， S。， Rachel， C。 and Westoby， M。 ( twenty-three ) 'Glacial lake outburst floods threaten millions globally' ， Nature Communications ， fourteen( one ) 。 https://doi.org/ ten . ten three eight /s four one four six seven - zero two three - three six zero three three - x
-- Zhang ， T 。 ， Wang ， W 。 ， Kougkoulos ， I 。 et al 。 ( twenty-five ) 'High frequency of moraine-dammed lake outburst floods driven by global warming' ， Nature Communications ， sixteen ， eleven one seven three 。 https://doi.org/ ten . ten three eight /s four one four six seven - zero two five - six seven six five zero - three
-- Willige ， A 。 ( twenty-three ) What are tropical glaciers and how is climate change affecting them? World Economic Forum ， twenty-six October 。 Available at: https://www.weforum.org/stories/ twenty-three / ten /tropical-glacier-climate-change-elnino-indonesia/ (Accessed: twenty-four April twenty-six ).
+- Emmer, A., Allen, S.K., Carey, M., Frey, H., Huggel, C., Korup, O., Mergili, M., Sattar, A., Veh, G., Chen, T.Y., Cook, S.J., Correas-Gonzalez, M., Das, S., Diaz Moreno, A., Drenkhan, F., Fischer, M., Immerzeel, W.W., Izagirre, E., Joshi, R.C., Kougkoulos, I., Kuyakanon Knapp, R., Li, D., Majeed, U., Matti, S., Moulton, H., Nick, F., Piroton, V., Rashid, I., Reza, M., Ribeiro de Figueiredo, A., Riveros, C., Shrestha, F., Shrestha, M., Steiner, J., Walker-Crawford, N., Wood, J.L. and Yde, J.C. (2022) 'Progress and challenges in glacial lake outburst flood research (2017–2021): a research community perspective', Natural Hazards and Earth System Sciences, 22, pp. 3041–3061. https://doi.org/10.5194/nhess-22-3041-2022
+- Taylor, C., Robinson, T., Dunning, S., Rachel, C. and Westoby, M. (2023) 'Glacial lake outburst floods threaten millions globally', Nature Communications, 14(1). https://doi.org/10.1038/s41467-023-36033-x
+- Zhang, T., Wang, W., Kougkoulos, I. et al. (2025) 'High frequency of moraine-dammed lake outburst floods driven by global warming', Nature Communications, 16, 11173. https://doi.org/10.1038/s41467-025-67650-3
+- Willige, A. (2023) What are tropical glaciers and how is climate change affecting them? World Economic Forum, 26 October. Available at: https://www.weforum.org/stories/2023/10/tropical-glacier-climate-change-elnino-indonesia/ (Accessed: 24 April 2026).
