@@ -9,7 +9,6 @@ website:
   favicon: favicon.ico
   repo-url: https://github.com/chad-casa/0025_BSA-Group
   repo-actions: [edit]
-  sharing: [twitter, facebook]
   navbar:
     right:
       - icon: github
