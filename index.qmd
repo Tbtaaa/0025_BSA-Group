@@ -703,9 +703,7 @@ The app runs entirely on Google Earth Engine using open-source data, requiring n
 <iframe src='https://prueba-488410.projects.earthengine.app/view/cordillera-blanca---risk-qpp' style="width: 100%; height: 85vh; border: none; border-radius: 6px;"></iframe>
 :::
 
-:::
-## How it Works 
-
+## How it Works
 ### Data Preparation and Precomputations
 All computationally intensive layers were pre-processed in dedicated GEE scripts and exported as raster assets, keeping the app lightweight and responsive.
 
